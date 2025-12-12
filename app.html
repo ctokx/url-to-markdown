@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML to Markdown for LLMs - Developer Tool</title>
+    <meta name="description"
+        content="HTML to Markdown converter with CORS proxy and selector picker for LLM developers.">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script src="js/config.js"></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0">
+
+    <script src="https://unpkg.com/turndown/dist/turndown.js"></script>
+    <script src="https://unpkg.com/turndown-plugin-gfm/dist/turndown-plugin-gfm.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <link rel="stylesheet" href="css/main.css">
+</head>
+
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col selection:bg-primary-500/30">
+
+    <header class="border-b border-slate-200 bg-white/80 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-[1600px] mx-auto px-4 h-14 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="p-1.5 bg-red-500/10 rounded-lg border border-red-500/20">
+                    <span class="material-symbols-outlined text-red-500 text-[20px]">bolt</span>
+                </div>
+                <div>
+                    <h1 class="font-bold text-base tracking-tight text-slate-900">MD4LLM</h1>
+                    <p class="text-[10px] text-slate-500">HTML → Markdown for LLMs</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+                <div
+                    class="hidden lg:flex items-center gap-1 text-[10px] text-slate-500 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+                    <kbd class="kbd">Ctrl</kbd>+<kbd class="kbd">Enter</kbd> Convert
+                    <span class="mx-1">|</span>
+                    <kbd class="kbd">Ctrl</kbd>+<kbd class="kbd">Shift</kbd>+<kbd class="kbd">C</kbd> Copy
+                </div>
+                <button onclick="loadDemo()"
+                    class="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-red-600 bg-red-500/10 border border-red-500/20 rounded hover:bg-red-500/20 transition-all">
+                    <span class="material-symbols-outlined text-[14px]">play_circle</span>
+                    Demo
+                </button>
+                <button onclick="showHelp()"
+                    class="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded hover:bg-slate-200 transition-all">
+                    <span class="material-symbols-outlined text-[14px]">help</span>
+                    Help
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-[1600px] mx-auto w-full p-3 grid grid-cols-1 xl:grid-cols-2 gap-3 overflow-hidden"
+        style="height: calc(100vh - 56px);">
+
+        <section class="flex flex-col gap-3 min-h-0">
+            <div class="bg-white rounded-lg p-3 border border-slate-200 shadow-sm">
+                <div class="flex items-center gap-2 mb-3">
+                    <div class="flex-1 relative">
+                        <span
+                            class="material-symbols-outlined text-[14px] absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500">link</span>
+                        <input type="text" id="url-input" placeholder="https://example.com/page (Enter to fetch)"
+                            class="w-full pl-8 pr-20 py-1.5 rounded input-glass text-xs text-slate-200 placeholder-slate-600 font-mono">
+                        <button onclick="fetchURL()" id="fetch-btn"
+                            class="absolute right-1 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[10px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded hover:bg-emerald-500/20 transition-all">
+                            Fetch
+                        </button>
+                    </div>
+                    <div class="relative flex-1 max-w-xs">
+                        <span
+                            class="material-symbols-outlined text-[14px] absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500">code</span>
+                        <input type="text" id="selector-input" list="selector-list" placeholder="CSS selector"
+                            value="body"
+                            class="w-full pl-8 pr-8 py-1.5 rounded input-glass text-xs text-primary-300 placeholder-slate-600 font-mono">
+                        <button onclick="toggleSelectorDropdown()" id="selector-dropdown-btn"
+                            class="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-slate-500 hover:text-slate-300 transition-colors hidden">
+                            <span class="material-symbols-outlined text-[16px]">expand_more</span>
+                        </button>
+                        <datalist id="selector-list"></datalist>
+                    </div>
+                </div>
+
+                <div id="selector-panel" class="hidden mt-2 p-2 bg-slate-50 rounded border border-slate-200">
+                    <div class="flex items-center gap-2 mb-2">
+                        <span class="text-[10px] font-semibold text-slate-400 uppercase">Available Selectors</span>
+                        <span id="selector-count" class="text-[10px] text-slate-600"></span>
+                        <button onclick="hideSelectorPanel()" class="ml-auto text-slate-500 hover:text-slate-300">
+                            <span class="material-symbols-outlined text-[14px]">close</span>
+                        </button>
+                    </div>
+
+                    <!-- Simple path display when inside an element -->
+                    <div id="drill-path-display"
+                        class="hidden mb-2 p-1.5 bg-slate-800/50 rounded text-[10px] font-mono flex items-center gap-2">
+                        <span class="text-slate-500">Inside:</span>
+                        <span id="drill-path-text" class="text-primary-400"></span>
+                        <button onclick="resetDrillPath()" class="ml-auto text-slate-400 hover:text-primary-400">← Show
+                            all</button>
+                    </div>
+
+                    <div class="flex gap-2 mb-2">
+                        <button onclick="filterSelectors('all')" class="selector-filter active"
+                            data-filter="all">All</button>
+                        <button onclick="filterSelectors('id')" class="selector-filter" data-filter="id">IDs</button>
+                        <button onclick="filterSelectors('class')" class="selector-filter"
+                            data-filter="class">Classes</button>
+                        <button onclick="filterSelectors('tag')" class="selector-filter" data-filter="tag">Tags</button>
+                    </div>
+
+                    <!-- Search input -->
+                    <div class="relative mb-2">
+                        <span
+                            class="material-symbols-outlined text-[12px] absolute left-2 top-1/2 -translate-y-1/2 text-slate-500">search</span>
+                        <input type="text" id="selector-search" placeholder="Search selectors..."
+                            oninput="searchSelectors(this.value)"
+                            class="w-full pl-7 pr-2 py-1 rounded bg-slate-800/50 border border-slate-700 text-[11px] text-slate-300 placeholder-slate-600 font-mono focus:outline-none focus:border-primary-500/50">
+                    </div>
+
+                    <div id="selector-items" class="flex flex-wrap gap-1 max-h-32 overflow-y-auto"></div>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="align-tables" checked class="peer sr-only">
+                        <div class="toggle-switch"></div>
+                        <span>Align Tables</span>
+                    </label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="remove-media" checked class="peer sr-only">
+                        <div class="toggle-switch"></div>
+                        <span>Strip Media</span>
+                    </label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="clean-noise" checked class="peer sr-only">
+                        <div class="toggle-switch"></div>
+                        <span>Smart Clean</span>
+                    </label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="extract-meta" class="peer sr-only">
+                        <div class="toggle-switch"></div>
+                        <span>Extract Meta</span>
+                    </label>
+                    <label class="toggle-label">
+                        <input type="checkbox" id="preserve-links" checked class="peer sr-only">
+                        <div class="toggle-switch"></div>
+                        <span>Keep Links</span>
+                    </label>
+                </div>
+            </div>
+
+            <div
+                class="flex-1 bg-white rounded-lg flex flex-col overflow-hidden border border-slate-200 shadow-sm min-h-0">
+                <div
+                    class="px-3 py-2 bg-slate-50 border-b border-slate-200 flex justify-between items-center flex-shrink-0">
+                    <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">HTML Input</span>
+                    <div class="flex items-center gap-3">
+                        <span id="input-char-count" class="text-[10px] font-mono text-slate-500">0 chars</span>
+                        <span id="input-status" class="text-[10px] text-slate-600"></span>
+                        <button onclick="clearInput()"
+                            class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
+                    </div>
+                </div>
+                <textarea id="html-input"
+                    class="flex-1 w-full bg-white p-3 text-xs font-mono text-slate-700 resize-none focus:outline-none placeholder-slate-400 leading-relaxed"
+                    placeholder="Paste HTML here or fetch from URL above..."></textarea>
+                <div class="p-2 border-t border-slate-200 bg-slate-50 flex-shrink-0">
+                    <button onclick="processHTML()"
+                        class="w-full py-2 bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-500 hover:to-primary-400 text-white font-medium text-sm rounded shadow-lg shadow-primary-500/20 transition-all active:scale-[0.99] flex items-center justify-center gap-2">
+                        <span class="material-symbols-outlined text-[18px]">transform</span>
+                        Convert to Markdown
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <section class="flex flex-col min-h-0">
+            <div
+                class="bg-white rounded-lg flex flex-col flex-1 border border-slate-200 shadow-sm overflow-hidden min-h-0">
+                <div class="flex items-center bg-slate-50 border-b border-slate-200 flex-shrink-0">
+                    <button id="tab-btn-markdown" onclick="switchTab('markdown')" class="tab-btn active">
+                        <span class="material-symbols-outlined text-[14px]">code</span> Markdown
+                    </button>
+                    <button id="tab-btn-preview" onclick="switchTab('preview')" class="tab-btn">
+                        <span class="material-symbols-outlined text-[14px]">preview</span> Preview
+                    </button>
+                    <button id="tab-btn-json" onclick="switchTab('json')" class="tab-btn">
+                        <span class="material-symbols-outlined text-[14px]">data_object</span> JSON
+                    </button>
+
+                    <div class="ml-auto flex items-center gap-2 pr-2">
+                        <button onclick="copyToClipboard()" title="Copy (Ctrl+Shift+C)" class="icon-btn">
+                            <span class="material-symbols-outlined text-[16px]">content_copy</span>
+                        </button>
+                        <button onclick="downloadOutput()" title="Download" class="icon-btn">
+                            <span class="material-symbols-outlined text-[16px]">download</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div
+                    class="px-3 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-4 text-[10px] font-mono flex-shrink-0">
+                    <span class="text-slate-500"><span id="char-count" class="text-slate-600">0</span> chars</span>
+                    <div class="flex-1"></div>
+                    <a href="https://platform.openai.com/tokenizer" target="_blank"
+                        class="text-slate-600 hover:text-slate-400">OpenAI Tokenizer</a>
+                    <span class="text-slate-700">|</span>
+                    <a href="https://ai.google.dev/gemini-api/docs/tokens?lang=python" target="_blank"
+                        class="text-slate-600 hover:text-slate-400">Gemini Tokens</a>
+                </div>
+
+                <div id="view-markdown" class="flex-1 relative min-h-0">
+                    <textarea id="markdown-output" readonly
+                        class="w-full h-full bg-white p-3 text-xs font-mono text-slate-700 resize-none focus:outline-none leading-relaxed"></textarea>
+                </div>
+
+                <div id="view-preview"
+                    class="hidden flex-1 bg-white p-4 overflow-y-auto prose prose-sm max-w-none min-h-0">
+                    <div class="text-center text-slate-400 mt-10">
+                        <span class="material-symbols-outlined text-3xl mb-2 opacity-50">preview</span>
+                        <p class="text-sm">Convert HTML to see preview</p>
+                    </div>
+                </div>
+
+                <div id="view-json" class="hidden flex-1 min-h-0">
+                    <textarea id="json-output" readonly
+                        class="w-full h-full bg-white p-3 text-xs font-mono text-emerald-600 resize-none focus:outline-none leading-relaxed"></textarea>
+                </div>
+
+            </div>
+        </section>
+    </main>
+
+    <div id="toast" class="fixed bottom-4 right-4 translate-y-20 opacity-0 transition-all duration-300 z-50">
+        <div id="toast-content"
+            class="bg-emerald-500 text-white px-3 py-2 rounded-lg shadow-xl flex items-center gap-2 text-sm">
+            <span class="material-symbols-outlined text-[18px]">check_circle</span>
+            <span id="toast-message">Copied!</span>
+        </div>
+    </div>
+
+    <div id="help-modal" class="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 hidden items-center justify-center">
+        <div
+            class="bg-white rounded-xl p-6 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto shadow-xl border border-slate-200">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-bold text-slate-900">Keyboard Shortcuts</h2>
+                <button onclick="hideHelp()" class="text-slate-400 hover:text-slate-700">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="space-y-2 text-sm">
+                <div class="flex justify-between py-2 border-b border-slate-200">
+                    <span class="text-slate-600">Convert HTML</span>
+                    <span class="font-mono text-red-600">Ctrl + Enter</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-slate-200">
+                    <span class="text-slate-600">Copy output</span>
+                    <span class="font-mono text-red-600">Ctrl + Shift + C</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-slate-200">
+                    <span class="text-slate-600">Fetch URL</span>
+                    <span class="font-mono text-red-600">Ctrl + Shift + F</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-slate-200">
+                    <span class="text-slate-600">Clear input</span>
+                    <span class="font-mono text-red-600">Ctrl + Shift + X</span>
+                </div>
+                <div class="flex justify-between py-2">
+                    <span class="text-slate-600">Show help</span>
+                    <span class="font-mono text-red-600">?</span>
+                </div>
+            </div>
+            <div class="mt-6 pt-4 border-t border-slate-200">
+                <h3 class="font-semibold text-slate-900 mb-2">CORS Proxy</h3>
+                <p class="text-xs text-slate-600 leading-relaxed">
+                    URL fetching uses public CORS proxies. For production use, deploy your own proxy or use a browser
+                    extension to bypass CORS.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading-overlay"
+        class="fixed inset-0 bg-white/70 backdrop-blur-sm z-50 hidden items-center justify-center">
+        <div class="bg-white rounded-xl p-6 flex flex-col items-center gap-3 shadow-lg border border-slate-200">
+            <div class="animate-spin rounded-full h-8 w-8 border-2 border-red-500 border-t-transparent"></div>
+            <span id="loading-text" class="text-sm text-slate-600">Fetching...</span>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+
+</html>
