@@ -1,6 +1,15 @@
 const assert = require('assert');
 const { convert, extractMetadata, createTurndownService } = require('../lib/converter');
-const { alignMarkdownTables, formatTable, isValidSelector, sanitizeFilename, getDomainFromUrl } = require('../lib/utils');
+const { looksLikeDynamicShell } = require('../lib/fetcher');
+const {
+    alignMarkdownTables,
+    formatTable,
+    isValidSelector,
+    sanitizeFilename,
+    getDomainFromUrl,
+    normalizeTextArtifacts,
+    dedupeMarkdownBoilerplate
+} = require('../lib/utils');
 
 const testResults = { passed: 0, failed: 0, tests: [] };
 
@@ -358,6 +367,132 @@ describe('TurndownService: Configuration', () => {
         const service = createTurndownService();
         const result = service.turndown('<pre><code>code</code></pre>');
         assert(result.includes('```') || result.includes('code'));
+    });
+});
+
+describe('Converter: Advanced Content Extraction', () => {
+    test('prefers readable article content for body selector', () => {
+        const html = `
+            <html>
+            <body>
+                <div id="root"></div>
+                <nav>Home Docs Pricing</nav>
+                <article>
+                    <h1>Core Guide</h1>
+                    <p>This is the main article text with enough words to be considered primary content for extraction.</p>
+                    <p>Second paragraph adds additional context and should remain in markdown output.</p>
+                </article>
+            </body>
+            </html>
+        `;
+        const result = convert(html, { selector: 'body', smartExtract: true });
+        assert(result.markdown.includes('Core Guide'));
+        assert(result.markdown.includes('main article text'));
+    });
+
+    test('can disable smart extraction', () => {
+        const html = '<html><body><main><p>Main text</p></main><aside>Sidebar links</aside></body></html>';
+        const result = convert(html, { selector: 'body', smartExtract: false, cleanNoise: false });
+        assert(result.markdown.includes('Sidebar links'));
+    });
+});
+
+describe('Converter: Advanced Fidelity', () => {
+    test('handles rowspan and colspan table structure', () => {
+        const html = `
+            <html><body>
+                <table>
+                    <tr><th>Quarter</th><th colspan="2">Revenue</th></tr>
+                    <tr><td rowspan="2">Q1</td><td>US</td><td>10</td></tr>
+                    <tr><td>EU</td><td>8</td></tr>
+                </table>
+            </body></html>
+        `;
+        const result = convert(html);
+        assert(result.markdown.includes('Quarter'));
+        assert(result.markdown.includes('Revenue'));
+        assert(result.markdown.includes('EU'));
+    });
+
+    test('preserves code block language from class names', () => {
+        const html = '<html><body><pre><code class="language-python">print(\"ok\")</code></pre></body></html>';
+        const result = convert(html);
+        assert(result.markdown.includes('```python'));
+        assert(result.markdown.includes('print(\"ok\")'));
+    });
+
+    test('preserves figure caption context when stripping media', () => {
+        const html = `
+            <html><body>
+                <figure>
+                    <img data-src="/hero.png" alt="Architecture Diagram">
+                    <figcaption>System architecture overview</figcaption>
+                </figure>
+            </body></html>
+        `;
+        const result = convert(html, { stripMedia: true, baseUrl: 'https://example.com/docs' });
+        assert(result.markdown.includes('Architecture Diagram'));
+        assert(result.markdown.includes('System architecture overview'));
+    });
+});
+
+describe('Converter: Metadata and Cleanup', () => {
+    test('extracts JSON-LD article metadata', () => {
+        const html = `
+            <html>
+            <head>
+                <script type="application/ld+json">
+                    {
+                      "@context":"https://schema.org",
+                      "@type":"Article",
+                      "headline":"Structured Headline",
+                      "author":{"@type":"Person","name":"Jane Doe"},
+                      "datePublished":"2025-01-01"
+                    }
+                </script>
+            </head>
+            <body><h1>Visible Heading</h1></body>
+            </html>
+        `;
+        const result = convert(html, { extractMeta: true });
+        assert(Array.isArray(result.metadata.json_ld));
+        assert(result.metadata.json_ld.some(item => item.headline === 'Structured Headline'));
+    });
+
+    test('normalizes mojibake artifacts', () => {
+        const fixed = normalizeTextArtifacts('\u00E2\u20AC\u2122 test \u00C2\u00A9');
+        assert(typeof fixed === 'string' && fixed.length > 0);
+        assert(!fixed.includes('\u00C2'));
+    });
+
+    test('dedupes repeated markdown boilerplate lines', () => {
+        const input = [
+            'Cookie policy',
+            'Cookie policy',
+            'Cookie policy',
+            '',
+            'Main content line'
+        ].join('\n');
+        const output = dedupeMarkdownBoilerplate(input);
+        assert(!output.includes('Cookie policy\nCookie policy\nCookie policy'));
+        assert(output.includes('Main content line'));
+    });
+});
+
+describe('Fetcher: Dynamic Shell Detection', () => {
+    test('detects likely app shell pages', () => {
+        const html = `
+            <html><body>
+                <div id="__next"></div>
+                <script src="/_next/static/chunk.js"></script>
+            </body></html>
+        `;
+        assert.strictEqual(looksLikeDynamicShell(html, 500), true);
+    });
+
+    test('does not flag content-rich pages', () => {
+        const html = `<html><body><article>${'word '.repeat(1500)}</article></body></html>`;
+        assert.strictEqual(looksLikeDynamicShell(html, 500), false);
     });
 });
 

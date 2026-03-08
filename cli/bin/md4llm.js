@@ -25,6 +25,14 @@ program
     .option('--no-links', 'Strip hyperlinks')
     .option('--strip-media', 'Remove images/video')
     .option('--meta', 'Include metadata extraction')
+    .option('--render-js', 'Use headless browser rendering (requires playwright)')
+    .option('--render-js-auto', 'Auto-fallback to JS rendering for thin/app-shell pages')
+    .option('--wait-ms <n>', 'Extra wait in milliseconds for --render-js mode', '0')
+    .option('--wait-selector <css>', 'Wait for selector in --render-js mode')
+    .option('--min-content-chars <n>', 'Minimum plain-text chars before JS fallback', '1200')
+    .option('--min-words <n>', 'Retry with JS render if output is below this word count', '120')
+    .option('--no-smart-extract', 'Disable readability/content-density extraction')
+    .option('--no-dedupe', 'Disable repeated boilerplate dedupe')
     .option('--batch <file>', 'Process URLs from file (one per line)')
     .option('--concurrency <n>', 'Batch concurrency limit', '3')
     .option('-i, --interactive', 'Interactive selector drilling mode')
@@ -48,6 +56,9 @@ ${chalk.bold('Examples:')}
 
   ${chalk.gray('# Interactive selector drilling')}
   md4llm https://example.com --interactive
+
+  ${chalk.gray('# JS-rendered pages (requires playwright)')}
+  md4llm https://example.com --render-js-auto
 `);
 
 program.parse();
@@ -81,9 +92,10 @@ async function readInput(source) {
 
     if (source.startsWith('http://') || source.startsWith('https://')) {
         log(`Fetching ${source}...`);
-        const result = await fetchUrl(source);
-        log(`Fetched ${(result.html.length / 1024).toFixed(1)} KB`, 'success');
-        return { html: result.html, baseUrl: result.finalUrl, isUrl: true };
+        const result = await fetchUrl(source, buildFetchOptions());
+        const renderedLabel = result.rendered ? ' (rendered)' : '';
+        log(`Fetched ${(result.html.length / 1024).toFixed(1)} KB${renderedLabel}`, 'success');
+        return { html: result.html, baseUrl: result.finalUrl, isUrl: true, rendered: !!result.rendered };
     }
 
     const filePath = path.resolve(source);
@@ -94,6 +106,17 @@ async function readInput(source) {
     log(`Reading ${filePath}...`);
     const html = fs.readFileSync(filePath, 'utf8');
     return { html, isUrl: false };
+}
+
+function buildFetchOptions(overrides = {}) {
+    return {
+        renderJs: options.renderJs,
+        renderJsAuto: options.renderJsAuto,
+        minContentChars: parseInt(options.minContentChars, 10) || 1200,
+        waitMs: parseInt(options.waitMs, 10) || 0,
+        waitSelector: options.waitSelector || null,
+        ...overrides
+    };
 }
 
 function writeOutput(content, outputPath, isDirectory = false, filename = 'output') {
@@ -116,19 +139,26 @@ function writeOutput(content, outputPath, isDirectory = false, filename = 'outpu
     log(`Saved to ${finalPath}`, 'success');
 }
 
-function formatResult(result, sourceUrl = null) {
+function formatResult(result, sourceUrl = null, fetchMeta = {}) {
     if (options.format === 'json') {
         const output = {
             ...result,
             sourceUrl,
             timestamp: new Date().toISOString(),
+            fetch: {
+                rendered: !!fetchMeta.rendered
+            },
             options: {
                 selector: options.selector,
                 alignTables: options.tables,
                 cleanNoise: options.clean,
                 stripMedia: options.stripMedia,
                 preserveLinks: options.links,
-                extractMeta: options.meta
+                extractMeta: options.meta,
+                smartExtract: options.smartExtract,
+                dedupe: options.dedupe,
+                renderJs: options.renderJs,
+                renderJsAuto: options.renderJsAuto
             }
         };
         return JSON.stringify(output, null, 2);
@@ -138,21 +168,59 @@ function formatResult(result, sourceUrl = null) {
 }
 
 async function processSingle(source) {
-    const { html, baseUrl, isUrl } = await readInput(source);
+    let { html, baseUrl, isUrl, rendered = false } = await readInput(source);
 
-    const result = convert(html, {
+    let result = convert(html, {
         selector: options.selector,
         baseUrl: baseUrl || (isUrl ? source : null),
         alignTables: options.tables,
         cleanNoise: options.clean,
         stripMedia: options.stripMedia,
         preserveLinks: options.links,
-        extractMeta: options.meta
+        extractMeta: options.meta,
+        smartExtract: options.smartExtract,
+        dedupeBoilerplate: options.dedupe
     });
+
+    if (isUrl && options.renderJsAuto && !rendered) {
+        const minWords = parseInt(options.minWords, 10) || 120;
+
+        if (result.stats.words < minWords) {
+            log(`Output has ${result.stats.words} words (<${minWords}); retrying with JS rendering...`, 'warn');
+
+            try {
+                const renderedFetch = await fetchUrl(source, buildFetchOptions({
+                    renderJs: true,
+                    renderJsAuto: false
+                }));
+
+                const renderedResult = convert(renderedFetch.html, {
+                    selector: options.selector,
+                    baseUrl: renderedFetch.finalUrl || source,
+                    alignTables: options.tables,
+                    cleanNoise: options.clean,
+                    stripMedia: options.stripMedia,
+                    preserveLinks: options.links,
+                    extractMeta: options.meta,
+                    smartExtract: options.smartExtract,
+                    dedupeBoilerplate: options.dedupe
+                });
+
+                if (renderedResult.stats.words > result.stats.words) {
+                    result = renderedResult;
+                    rendered = true;
+                    baseUrl = renderedFetch.finalUrl || baseUrl;
+                    log(`JS render retry improved output to ${result.stats.words} words`, 'success');
+                }
+            } catch (error) {
+                log(`JS render retry skipped: ${error.message}`, 'warn');
+            }
+        }
+    }
 
     log(`Converted: ${result.stats.characters.toLocaleString()} chars, ${result.stats.words.toLocaleString()} words`, 'success');
 
-    const output = formatResult(result, isUrl ? source : null);
+    const output = formatResult(result, isUrl ? (baseUrl || source) : null, { rendered });
     writeOutput(output, options.output);
 }
 
@@ -176,6 +244,7 @@ async function processBatch(batchFile) {
     const outputDir = options.output || './md4llm-output';
 
     const results = await fetchUrls(urls, {
+        ...buildFetchOptions(),
         concurrency: parseInt(options.concurrency, 10),
         onProgress: (url, index, total, result) => {
             if (result.error) {
@@ -191,17 +260,52 @@ async function processBatch(batchFile) {
         if (result.error || !result.html) continue;
 
         try {
-            const converted = convert(result.html, {
+            let converted = convert(result.html, {
                 selector: options.selector,
                 baseUrl: result.finalUrl || result.url,
                 alignTables: options.tables,
                 cleanNoise: options.clean,
                 stripMedia: options.stripMedia,
                 preserveLinks: options.links,
-                extractMeta: options.meta
+                extractMeta: options.meta,
+                smartExtract: options.smartExtract,
+                dedupeBoilerplate: options.dedupe
             });
 
-            const output = formatResult(converted, result.url);
+            let rendered = !!result.rendered;
+            const minWords = parseInt(options.minWords, 10) || 120;
+
+            if (options.renderJsAuto && !rendered && converted.stats.words < minWords) {
+                try {
+                    const renderedFetch = await fetchUrl(result.url, buildFetchOptions({
+                        renderJs: true,
+                        renderJsAuto: false
+                    }));
+
+                    const renderedConverted = convert(renderedFetch.html, {
+                        selector: options.selector,
+                        baseUrl: renderedFetch.finalUrl || result.url,
+                        alignTables: options.tables,
+                        cleanNoise: options.clean,
+                        stripMedia: options.stripMedia,
+                        preserveLinks: options.links,
+                        extractMeta: options.meta,
+                        smartExtract: options.smartExtract,
+                        dedupeBoilerplate: options.dedupe
+                    });
+
+                    if (renderedConverted.stats.words > converted.stats.words) {
+                        converted = renderedConverted;
+                        rendered = true;
+                    }
+                } catch (_error) {
+                    // Keep original conversion in batch mode when render retry is unavailable.
+                }
+            }
+
+            const output = formatResult(converted, result.finalUrl || result.url, {
+                rendered
+            });
             const filename = getDomainFromUrl(result.url) + '_' + Date.now();
             writeOutput(output, outputDir, true, filename);
             successCount++;
@@ -336,14 +440,16 @@ async function processInteractive(source) {
                 cleanNoise: options.clean,
                 stripMedia: options.stripMedia,
                 preserveLinks: options.links,
-                extractMeta: options.meta
+                extractMeta: options.meta,
+                smartExtract: false,
+                dedupeBoilerplate: options.dedupe
             });
 
             result.selector = finalSelector;
 
             log(`Converted: ${result.stats.characters.toLocaleString()} chars, ${result.stats.words.toLocaleString()} words`, 'success');
 
-            const output = formatResult(result, isUrl ? source : null);
+            const output = formatResult(result, isUrl ? source : null, { rendered: false });
             writeOutput(output, options.output);
             return;
         }

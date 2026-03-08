@@ -15,6 +15,270 @@ let originalDocHead = null;
 let currentDrillParent = null; // Current parent selector for showing children
 let drillOriginalHtml = null;
 
+function normalizeTextArtifacts(text) {
+    if (!text || typeof text !== 'string') return text;
+
+    let normalized = text;
+    const replacements = [
+        ['Â©', '©'],
+        ['Â®', '®'],
+        ['Â°', '°'],
+        ['Â·', '·'],
+        ['Â', ''],
+        ['â€™', '’'],
+        ['â€˜', '‘'],
+        ['â€œ', '“'],
+        ['â€', '”'],
+        ['â€“', '–'],
+        ['â€”', '—'],
+        ['â€¦', '…'],
+        ['â€¢', '•'],
+        ['â„¢', '™']
+    ];
+
+    for (const [bad, good] of replacements) {
+        normalized = normalized.split(bad).join(good);
+    }
+
+    return normalized;
+}
+
+function sanitizeInlineText(text) {
+    if (!text) return '';
+    return normalizeTextArtifacts(text)
+        .replace(/\u00a0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function detectDynamicShell(html) {
+    const textLength = html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim().length;
+
+    if (textLength > 1200) return false;
+
+    const signals = [
+        /id=["']__next["']/i,
+        /id=["']__nuxt["']/i,
+        /id=["']root["']/i,
+        /data-reactroot/i,
+        /webpack/i,
+        /chunk[-_.]/i,
+        /<script[^>]+type=["']module["']/i
+    ];
+
+    return signals.some(pattern => pattern.test(html));
+}
+
+function extractCodeLanguage(node) {
+    if (!node) return '';
+
+    const classNames = [
+        node.className || '',
+        node.getAttribute ? (node.getAttribute('class') || '') : '',
+        node.getAttribute ? (node.getAttribute('data-language') || '') : ''
+    ].join(' ');
+
+    const patterns = [
+        /(?:^|\s)language-([a-z0-9_+-]+)(?:\s|$)/i,
+        /(?:^|\s)lang-([a-z0-9_+-]+)(?:\s|$)/i,
+        /(?:^|\s)brush:\s*([a-z0-9_+-]+)(?:\s|$)/i
+    ];
+
+    for (const pattern of patterns) {
+        const match = classNames.match(pattern);
+        if (match && match[1]) return match[1].toLowerCase();
+    }
+
+    return '';
+}
+
+function escapeTableCell(text) {
+    return sanitizeInlineText(text).replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+}
+
+function buildTableMatrix(tableNode) {
+    const rows = Array.from(tableNode.querySelectorAll('tr'));
+    const matrix = [];
+    const spans = new Map();
+    let maxCols = 0;
+
+    rows.forEach((tr, rowIndex) => {
+        if (!matrix[rowIndex]) matrix[rowIndex] = [];
+        let colIndex = 0;
+
+        const placeSpans = () => {
+            while (spans.has(`${rowIndex},${colIndex}`)) {
+                matrix[rowIndex][colIndex] = spans.get(`${rowIndex},${colIndex}`);
+                spans.delete(`${rowIndex},${colIndex}`);
+                colIndex += 1;
+            }
+        };
+
+        placeSpans();
+
+        const cells = Array.from(tr.children).filter(node => node.tagName === 'TD' || node.tagName === 'TH');
+
+        cells.forEach(cell => {
+            placeSpans();
+
+            const cellText = escapeTableCell(cell.textContent || '');
+            const colspan = Math.max(1, parseInt(cell.getAttribute('colspan') || '1', 10) || 1);
+            const rowspan = Math.max(1, parseInt(cell.getAttribute('rowspan') || '1', 10) || 1);
+
+            for (let r = 0; r < rowspan; r++) {
+                const targetRow = rowIndex + r;
+                if (!matrix[targetRow]) matrix[targetRow] = [];
+
+                for (let c = 0; c < colspan; c++) {
+                    const targetCol = colIndex + c;
+                    if (r === 0) {
+                        matrix[targetRow][targetCol] = cellText;
+                    } else {
+                        spans.set(`${targetRow},${targetCol}`, '');
+                    }
+                }
+            }
+
+            colIndex += colspan;
+            placeSpans();
+        });
+
+        while (spans.has(`${rowIndex},${colIndex}`)) {
+            matrix[rowIndex][colIndex] = spans.get(`${rowIndex},${colIndex}`);
+            spans.delete(`${rowIndex},${colIndex}`);
+            colIndex += 1;
+        }
+
+        maxCols = Math.max(maxCols, matrix[rowIndex].length);
+    });
+
+    matrix.forEach(row => {
+        while (row.length < maxCols) row.push('');
+    });
+
+    return matrix.filter(row => row.some(cell => (cell || '').trim().length > 0));
+}
+
+function tableToMarkdown(tableNode) {
+    const matrix = buildTableMatrix(tableNode);
+    if (matrix.length === 0) return '';
+
+    const firstRow = tableNode.querySelector('tr');
+    const hasHeaderRow = !!(firstRow && firstRow.querySelector('th'));
+    const header = hasHeaderRow ? matrix[0] : matrix[0].map((_, i) => `Column ${i + 1}`);
+    const bodyRows = hasHeaderRow ? matrix.slice(1) : matrix;
+
+    const colWidths = header.map((_, col) => {
+        const values = [header[col], ...bodyRows.map(row => row[col] || '')];
+        return Math.max(3, ...values.map(v => (v || '').length));
+    });
+
+    const renderRow = (row) => `| ${row.map((cell, i) => (cell || '').padEnd(colWidths[i], ' ')).join(' | ')} |`;
+    const lines = [
+        renderRow(header),
+        `| ${colWidths.map(width => '-'.repeat(width)).join(' | ')} |`,
+        ...bodyRows.map(renderRow)
+    ];
+
+    return `\n\n${lines.join('\n')}\n\n`;
+}
+
+function dedupeMarkdownBoilerplate(markdown) {
+    const lines = markdown.split('\n');
+    const deduped = [];
+    const counts = new Map();
+    let previous = null;
+    let inCodeFence = false;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        if (trimmed.startsWith('```')) {
+            inCodeFence = !inCodeFence;
+            deduped.push(line);
+            previous = line;
+            continue;
+        }
+
+        if (!inCodeFence && line === previous && trimmed.length > 0) {
+            continue;
+        }
+
+        deduped.push(line);
+        previous = line;
+    }
+
+    for (const line of deduped) {
+        const key = line.trim().toLowerCase();
+        if (key.length < 8 || key.length > 140) continue;
+        counts.set(key, (counts.get(key) || 0) + 1);
+    }
+
+    return deduped
+        .filter(line => {
+            const key = line.trim().toLowerCase();
+            if (!key) return true;
+            if (!counts.has(key)) return true;
+            if (counts.get(key) < 3) return true;
+            return false;
+        })
+        .join('\n');
+}
+
+function scoreCandidate(node) {
+    const text = sanitizeInlineText(node.textContent || '');
+    const textLength = text.length;
+    if (textLength < 180) return -Infinity;
+
+    const linkTextLength = Array.from(node.querySelectorAll('a'))
+        .map(a => sanitizeInlineText(a.textContent || '').length)
+        .reduce((sum, len) => sum + len, 0);
+
+    const linkDensity = textLength > 0 ? linkTextLength / textLength : 1;
+    const paragraphCount = node.querySelectorAll('p').length;
+    const headingCount = node.querySelectorAll('h1,h2,h3').length;
+    const listCount = node.querySelectorAll('li').length;
+
+    let score = textLength * (1 - Math.min(linkDensity, 0.95));
+    score += paragraphCount * 35;
+    score += headingCount * 25;
+    score -= listCount * 4;
+
+    const tag = node.tagName ? node.tagName.toLowerCase() : '';
+    if (tag === 'article' || tag === 'main') score *= 1.4;
+
+    const idClass = `${node.id || ''} ${node.className || ''}`.toLowerCase();
+    if (/(article|content|main|post|entry|body)/.test(idClass)) score *= 1.2;
+    if (/(nav|menu|footer|header|sidebar|breadcrumb)/.test(idClass)) score *= 0.6;
+
+    return score;
+}
+
+function pickBestContentCandidate(doc) {
+    const candidates = [
+        ...Array.from(doc.querySelectorAll('article, main, [role="main"]')),
+        ...Array.from(doc.querySelectorAll('section, div'))
+    ];
+
+    let best = null;
+    let bestScore = -Infinity;
+
+    candidates.forEach(node => {
+        const score = scoreCandidate(node);
+        if (score > bestScore) {
+            best = node;
+            bestScore = score;
+        }
+    });
+
+    return bestScore > 320 ? best : null;
+}
+
 const turndownService = new TurndownService({
     headingStyle: 'atx',
     codeBlockStyle: 'fenced',
@@ -28,47 +292,28 @@ turndownService.addRule('cleanSpans', {
     replacement: content => content
 });
 
-// Custom rule to handle complex tables (e.g., from MS Word/SharePoint)
+turndownService.addRule('codeBlocksWithLanguage', {
+    filter: function (node) {
+        return node.nodeName === 'PRE';
+    },
+    replacement: function (_content, node) {
+        const codeNode = node.querySelector('code');
+        const source = codeNode ? codeNode.textContent : node.textContent;
+        const language = extractCodeLanguage(codeNode || node);
+        const code = normalizeTextArtifacts(source || '')
+            .replace(/\r\n/g, '\n')
+            .replace(/^\n+/, '')
+            .replace(/\n+$/, '');
+        return `\n\n\`\`\`${language}\n${code}\n\`\`\`\n\n`;
+    }
+});
+
 turndownService.addRule('cleanComplexTables', {
     filter: function (node) {
         return node.nodeName === 'TABLE';
     },
-    replacement: function (content, node) {
-        // Extract clean table data from complex HTML tables
-        const rows = [];
-        const tableRows = node.querySelectorAll('tr');
-
-        tableRows.forEach(tr => {
-            const cells = [];
-            tr.querySelectorAll('td, th').forEach(cell => {
-                // Extract just the text content, stripping all nested elements
-                let text = cell.textContent.trim().replace(/\s+/g, ' ').replace(/\|/g, '\\|');
-                cells.push(text);
-            });
-            if (cells.length > 0) {
-                rows.push(cells);
-            }
-        });
-
-        if (rows.length === 0) return '';
-
-        // Determine column count
-        const colCount = Math.max(...rows.map(r => r.length));
-
-        // Build Markdown table
-        let md = '\n\n';
-        rows.forEach((row, idx) => {
-            // Pad row to have consistent columns
-            while (row.length < colCount) row.push('');
-            md += '| ' + row.join(' | ') + ' |\n';
-            // Add separator after header row
-            if (idx === 0) {
-                md += '| ' + row.map(() => '---').join(' | ') + ' |\n';
-            }
-        });
-        md += '\n';
-
-        return md;
+    replacement: function (_content, node) {
+        return tableToMarkdown(node);
     }
 });
 
@@ -148,7 +393,7 @@ print(response.choices[0].message.content)</code></pre>
 </body>
 </html>`;
 
-async function fetchURL() {
+async function fetchURL(convertAfterFetch = false) {
     const urlInput = document.getElementById('url-input');
     const url = urlInput.value.trim();
 
@@ -182,6 +427,10 @@ async function fetchURL() {
                 showToast('URL fetched successfully');
                 updateInputStats();
 
+                if (detectDynamicShell(html)) {
+                    showToast('Page looks JS-rendered; for fuller output use CLI with --render-js', 'warning');
+                }
+
                 // Clear drill state from previous fetch
                 drillOriginalHtml = null;
                 currentDrillParent = null;
@@ -192,6 +441,9 @@ async function fetchURL() {
                 if (searchInput) searchInput.value = '';
 
                 extractSelectorsFromHTML(html);
+                if (convertAfterFetch) {
+                    await processHTML();
+                }
                 return true;
             }
         } catch (e) {
@@ -202,6 +454,200 @@ async function fetchURL() {
     hideLoading();
     showToast('Failed to fetch URL. Try pasting HTML directly.', 'error');
     return false;
+}
+
+function absolutizeUrl(value, baseUrl) {
+    if (!value || !baseUrl) return value;
+
+    const trimmed = String(value).trim();
+    if (!trimmed) return trimmed;
+    if (/^(mailto:|tel:|javascript:|data:|#)/i.test(trimmed)) return trimmed;
+
+    try {
+        return new URL(trimmed, baseUrl).href;
+    } catch (_error) {
+        return trimmed;
+    }
+}
+
+function normalizeSrcset(srcset, baseUrl) {
+    if (!srcset || !baseUrl) return srcset;
+
+    return srcset
+        .split(',')
+        .map(part => {
+            const trimmed = part.trim();
+            if (!trimmed) return trimmed;
+            const pieces = trimmed.split(/\s+/);
+            const src = pieces.shift();
+            const descriptor = pieces.join(' ');
+            const abs = absolutizeUrl(src, baseUrl);
+            return descriptor ? `${abs} ${descriptor}` : abs;
+        })
+        .join(', ');
+}
+
+function resolveUrls(root, baseUrl, doc = null) {
+    if (!root || !baseUrl) return;
+
+    let effectiveBase = baseUrl;
+    if (doc) {
+        const baseTag = doc.querySelector('base[href]');
+        if (baseTag) {
+            effectiveBase = absolutizeUrl(baseTag.getAttribute('href'), baseUrl) || baseUrl;
+        }
+    }
+
+    root.querySelectorAll('a[href], img, source, video, audio, link[rel="canonical"]').forEach(tag => {
+        const attrs = ['href', 'src', 'poster', 'data-src', 'data-href', 'data-original', 'data-lazy-src'];
+        attrs.forEach(attr => {
+            if (!tag.hasAttribute(attr)) return;
+            const raw = tag.getAttribute(attr);
+            const abs = absolutizeUrl(raw, effectiveBase);
+            tag.setAttribute(attr, abs);
+
+            if ((attr === 'data-src' || attr === 'data-original' || attr === 'data-lazy-src') && !tag.getAttribute('src')) {
+                tag.setAttribute('src', abs);
+            }
+
+            if (attr === 'data-href' && !tag.getAttribute('href')) {
+                tag.setAttribute('href', abs);
+            }
+        });
+
+        if (tag.hasAttribute('srcset')) {
+            tag.setAttribute('srcset', normalizeSrcset(tag.getAttribute('srcset'), effectiveBase));
+        }
+
+        if (tag.tagName === 'IMG' && !tag.getAttribute('src') && tag.getAttribute('srcset')) {
+            const firstCandidate = tag.getAttribute('srcset').split(',')[0].trim().split(/\s+/)[0];
+            if (firstCandidate) tag.setAttribute('src', firstCandidate);
+        }
+
+        if (tag.tagName === 'A') {
+            const text = sanitizeInlineText(tag.textContent || '');
+            const href = tag.getAttribute('href');
+            if (!text && href && !href.startsWith('#')) {
+                tag.textContent = href;
+            }
+        }
+    });
+}
+
+function cleanNoiseInNode(cleanNode) {
+    const noiseSelectors = [
+        'script', 'style', 'noscript', 'iframe', 'svg',
+        '.ad', '.ads', '.advertisement', '.social-share', '.sponsored', '.promo',
+        '.nav', 'nav', 'footer', '.footer', '[role="navigation"]', '[role="contentinfo"]',
+        'header:not(article header):not(main header)', '.sidebar', '.cookie-banner', '.cookie', '.consent',
+        '.popup', '.modal', '[role="banner"]',
+        '.comments', '#comments', '.related-posts', '.related', '.newsletter', '.subscribe'
+    ];
+
+    noiseSelectors.forEach(sel => {
+        try {
+            cleanNode.querySelectorAll(sel).forEach(el => el.remove());
+        } catch (_error) { }
+    });
+
+    cleanNode.querySelectorAll('[style*="display: none"], [style*="display:none"], [hidden], [aria-hidden="true"]').forEach(el => el.remove());
+
+    const boilerplatePatterns = [
+        /cookie/i,
+        /privacy policy/i,
+        /terms of (service|use)/i,
+        /subscribe/i,
+        /all rights reserved/i
+    ];
+
+    cleanNode.querySelectorAll('div, section, aside, p, li').forEach(node => {
+        const text = sanitizeInlineText(node.textContent || '');
+        if (text.length > 0 && text.length <= 220 && boilerplatePatterns.some(pattern => pattern.test(text))) {
+            node.remove();
+        }
+    });
+}
+
+function removeMediaWithContext(cleanNode) {
+    cleanNode.querySelectorAll('figure').forEach(figure => {
+        const img = figure.querySelector('img');
+        const figcaption = figure.querySelector('figcaption');
+        const alt = img ? sanitizeInlineText(img.getAttribute('alt') || img.getAttribute('title') || '') : '';
+        const caption = figcaption ? sanitizeInlineText(figcaption.textContent || '') : '';
+        const chunks = [];
+
+        if (alt) chunks.push(alt);
+        if (caption) chunks.push(`caption: ${caption}`);
+
+        if (chunks.length > 0) {
+            const span = document.createElement('span');
+            span.textContent = `[Image: ${chunks.join(' | ')}]`;
+            figure.parentNode.replaceChild(span, figure);
+        } else {
+            figure.remove();
+        }
+    });
+
+    cleanNode.querySelectorAll('img, video, audio, picture, canvas, source').forEach(el => {
+        if (!el.parentNode) return;
+
+        if (el.tagName === 'IMG') {
+            const alt = sanitizeInlineText(el.getAttribute('alt') || el.getAttribute('title') || '');
+            if (alt) {
+                const span = document.createElement('span');
+                span.textContent = `[Image: ${alt}]`;
+                el.parentNode.replaceChild(span, el);
+                return;
+            }
+        }
+
+        el.remove();
+    });
+}
+
+function stripLinksFromNode(cleanNode) {
+    cleanNode.querySelectorAll('a').forEach(a => {
+        const span = document.createElement('span');
+        span.textContent = sanitizeInlineText(a.textContent || '') || a.getAttribute('href') || '';
+        a.parentNode.replaceChild(span, a);
+    });
+}
+
+function flattenJsonLdNode(node, output) {
+    if (!node) return;
+
+    if (Array.isArray(node)) {
+        node.forEach(item => flattenJsonLdNode(item, output));
+        return;
+    }
+
+    if (typeof node !== 'object') return;
+
+    if (Array.isArray(node['@graph'])) {
+        node['@graph'].forEach(item => flattenJsonLdNode(item, output));
+    }
+
+    const entry = {};
+    const type = node['@type'];
+    if (type) entry.type = Array.isArray(type) ? type.join(', ') : String(type);
+
+    ['headline', 'name', 'description', 'datePublished', 'dateModified', 'inLanguage', 'url'].forEach(key => {
+        if (node[key]) entry[key] = node[key];
+    });
+
+    if (node.author) {
+        if (Array.isArray(node.author)) {
+            entry.author = node.author.map(author => (author && typeof author === 'object' ? author.name : author)).filter(Boolean).join(', ');
+        } else if (typeof node.author === 'object') {
+            entry.author = node.author.name || '';
+        } else {
+            entry.author = node.author;
+        }
+    }
+
+    if (entry.type && Object.keys(entry).length > 1) {
+        output.push(entry);
+    }
 }
 
 async function processHTML() {
@@ -216,7 +662,7 @@ async function processHTML() {
     const doPreserveLinks = document.getElementById('preserve-links').checked;
 
     if (!rawHtml.trim() && baseUrl) {
-        const fetched = await fetchURL();
+        const fetched = await fetchURL(false);
         if (!fetched) return;
         rawHtml = document.getElementById('html-input').value;
     }
@@ -235,85 +681,64 @@ async function processHTML() {
         if (originalDocHead) {
             // Create a temporary doc with the original head for metadata extraction
             const tempDoc = parser.parseFromString(`<html><head>${originalDocHead}</head><body></body></html>`, 'text/html');
-            metadata = extractMetadata(tempDoc);
+            metadata = extractMetadata(tempDoc, baseUrl);
         } else {
-            metadata = extractMetadata(doc);
+            metadata = extractMetadata(doc, baseUrl);
         }
     }
 
     if (baseUrl) {
-        try {
-            const base = new URL(baseUrl);
-            doc.querySelectorAll('a[href], img[src]').forEach(tag => {
-                if (tag.hasAttribute('href')) {
-                    try {
-                        tag.setAttribute('href', new URL(tag.getAttribute('href'), base).href);
-                    } catch (e) { }
-                }
-                if (tag.hasAttribute('src')) {
-                    try {
-                        tag.setAttribute('src', new URL(tag.getAttribute('src'), base).href);
-                    } catch (e) { }
-                }
-            });
-        } catch (e) { }
+        resolveUrls(doc, baseUrl, doc);
     }
 
     let targetElement = doc.querySelector(selector);
+    let selectorUsed = selector;
     if (!targetElement) {
         showToast(`Selector "${selector}" not found, using body`, 'warning');
         targetElement = doc.body;
+        selectorUsed = 'body (fallback)';
+    }
+
+    if (selector.trim() === 'body') {
+        const bestCandidate = pickBestContentCandidate(doc);
+        if (bestCandidate && bestCandidate !== doc.body) {
+            targetElement = bestCandidate;
+            if (bestCandidate.id) {
+                selectorUsed = `#${bestCandidate.id} (auto)`;
+            } else if (bestCandidate.classList && bestCandidate.classList.length > 0) {
+                selectorUsed = `.${bestCandidate.classList[0]} (auto)`;
+            } else {
+                selectorUsed = `${bestCandidate.tagName.toLowerCase()} (auto)`;
+            }
+        }
     }
 
     let cleanNode = targetElement.cloneNode(true);
 
     if (doCleanNoise) {
-        const noiseSelectors = [
-            'script', 'style', 'noscript', 'iframe', 'svg',
-            '.ad', '.ads', '.advertisement', '.social-share',
-            '.nav', 'nav', 'footer', '.footer',
-            'header:not(article header)', '.sidebar', '.cookie-banner',
-            '.popup', '.modal', '[role="banner"]', '[role="navigation"]',
-            '.comments', '#comments', '.related-posts'
-        ];
-        noiseSelectors.forEach(sel => {
-            try {
-                cleanNode.querySelectorAll(sel).forEach(el => el.remove());
-            } catch (e) { }
-        });
-        cleanNode.querySelectorAll('[style*="display: none"], [style*="display:none"], [hidden]').forEach(el => el.remove());
+        cleanNoiseInNode(cleanNode);
     }
 
     if (doRemoveMedia) {
-        cleanNode.querySelectorAll('img, video, audio, picture, figure, canvas').forEach(el => {
-            if (el.tagName === 'IMG' && el.alt) {
-                const span = document.createElement('span');
-                span.textContent = `[Image: ${el.alt}]`;
-                el.parentNode.replaceChild(span, el);
-            } else {
-                el.remove();
-            }
-        });
+        removeMediaWithContext(cleanNode);
     }
 
     if (!doPreserveLinks) {
-        cleanNode.querySelectorAll('a').forEach(a => {
-            const span = document.createElement('span');
-            span.textContent = a.textContent;
-            a.parentNode.replaceChild(span, a);
-        });
+        stripLinksFromNode(cleanNode);
     }
 
     let markdown = turndownService.turndown(cleanNode.innerHTML);
+    markdown = normalizeTextArtifacts(markdown);
 
     if (doAlignTables) {
         markdown = alignMarkdownTables(markdown);
     }
 
+    markdown = dedupeMarkdownBoilerplate(markdown);
     markdown = markdown.replace(/\n{3,}/g, '\n\n').trim();
 
     // Determine actual selector used
-    const actualSelector = (lastUsedSelector !== 'body' && selector === 'body') ? lastUsedSelector : selector;
+    const actualSelector = (lastUsedSelector !== 'body' && selector === 'body') ? lastUsedSelector : selectorUsed;
 
     conversionResult = {
         markdown: markdown,
@@ -336,26 +761,47 @@ async function processHTML() {
     updateJSON();
 }
 
-function extractMetadata(doc) {
+function extractMetadata(doc, baseUrl = null) {
     const meta = {};
 
     const title = doc.querySelector('title');
-    if (title) meta.title = title.textContent.trim();
+    if (title) meta.title = sanitizeInlineText(title.textContent || '');
 
-    const metaTags = ['description', 'author', 'keywords', 'og:title', 'og:description', 'og:image', 'twitter:title', 'twitter:description'];
+    const metaTags = ['description', 'author', 'keywords', 'og:title', 'og:description', 'og:image', 'og:url', 'twitter:title', 'twitter:description', 'twitter:image'];
     metaTags.forEach(name => {
         const el = doc.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
         if (el) {
             const key = name.replace(':', '_');
-            meta[key] = el.getAttribute('content');
+            meta[key] = sanitizeInlineText(el.getAttribute('content') || '');
         }
     });
 
     const canonical = doc.querySelector('link[rel="canonical"]');
-    if (canonical) meta.canonical = canonical.getAttribute('href');
+    if (canonical) {
+        const href = canonical.getAttribute('href');
+        meta.canonical = baseUrl ? absolutizeUrl(href, baseUrl) : href;
+    }
 
     const h1 = doc.querySelector('h1');
-    if (h1) meta.h1 = h1.textContent.trim();
+    if (h1) meta.h1 = sanitizeInlineText(h1.textContent || '');
+
+    const lang = doc.documentElement ? doc.documentElement.getAttribute('lang') : '';
+    if (lang) meta.language = lang;
+
+    const jsonLd = [];
+    doc.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+        const raw = (script.textContent || '').trim();
+        if (!raw) return;
+        try {
+            const parsed = JSON.parse(raw);
+            flattenJsonLdNode(parsed, jsonLd);
+        } catch (_error) {
+            // Ignore malformed JSON-LD
+        }
+    });
+    if (jsonLd.length > 0) {
+        meta.json_ld = jsonLd;
+    }
 
     return meta;
 }
@@ -496,11 +942,21 @@ function downloadOutput() {
     link.click();
 }
 
+function toggleOpt(btn) {
+    const isOn = btn.classList.toggle('on');
+    const checkbox = document.getElementById(btn.dataset.for);
+    if (checkbox) checkbox.checked = isOn;
+}
+
 function loadDemo() {
     document.getElementById('html-input').value = DEMO_HTML;
     document.getElementById('selector-input').value = '.main-content';
     document.getElementById('url-input').value = 'https://example.com/article';
-    document.getElementById('extract-meta').checked = true;
+    // Sync the extract-meta toggle button + checkbox
+    const metaCheckbox = document.getElementById('extract-meta');
+    if (metaCheckbox) metaCheckbox.checked = true;
+    const metaBtn = document.querySelector('[data-for="extract-meta"]');
+    if (metaBtn) metaBtn.classList.add('on');
     document.getElementById('input-status').textContent = 'Demo loaded';
     processHTML();
 }
@@ -515,42 +971,43 @@ function showToast(message, type = 'success') {
     const content = document.getElementById('toast-content');
     const messageEl = document.getElementById('toast-message');
 
-    content.className = 'px-3 py-2 rounded-lg shadow-xl flex items-center gap-2 text-sm ';
+    content.className = 'toast';
     if (type === 'error') {
-        content.className += 'bg-red-500 text-white';
+        content.style.background = '#B91C1C';
     } else if (type === 'warning') {
-        content.className += 'bg-amber-500 text-white';
+        content.style.background = '#B45309';
     } else {
-        content.className += 'bg-emerald-500 text-white';
+        content.style.background = '#15803D';
     }
 
     messageEl.textContent = message;
-    toast.classList.remove('translate-y-20', 'opacity-0');
+    toast.style.transform = 'translateY(0)';
+    toast.style.opacity = '1';
+    toast.style.pointerEvents = 'auto';
 
-    setTimeout(() => {
-        toast.classList.add('translate-y-20', 'opacity-0');
+    clearTimeout(window._toastTimer);
+    window._toastTimer = setTimeout(() => {
+        toast.style.transform = 'translateY(80px)';
+        toast.style.opacity = '0';
+        toast.style.pointerEvents = 'none';
     }, 2500);
 }
 
 function showLoading(text = 'Loading...') {
     document.getElementById('loading-text').textContent = text;
     document.getElementById('loading-overlay').classList.remove('hidden');
-    document.getElementById('loading-overlay').classList.add('flex');
 }
 
 function hideLoading() {
     document.getElementById('loading-overlay').classList.add('hidden');
-    document.getElementById('loading-overlay').classList.remove('flex');
 }
 
 function showHelp() {
     document.getElementById('help-modal').classList.remove('hidden');
-    document.getElementById('help-modal').classList.add('flex');
 }
 
 function hideHelp() {
     document.getElementById('help-modal').classList.add('hidden');
-    document.getElementById('help-modal').classList.remove('flex');
 }
 
 document.addEventListener('keydown', (e) => {
@@ -575,7 +1032,7 @@ document.addEventListener('keydown', (e) => {
 
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
         e.preventDefault();
-        fetchURL();
+        fetchURL(true);
     }
 
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'X') {
@@ -587,7 +1044,7 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('url-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
         e.preventDefault();
-        fetchURL();
+        fetchURL(true);
     }
 });
 
@@ -797,7 +1254,6 @@ function showChildrenOf(parentSelector, parentElement) {
 
     if (children.length > 0) {
         pathDisplay.classList.remove('hidden');
-        pathDisplay.classList.add('flex');
         pathText.textContent = currentDrillParent;
 
         // Show children in selector items

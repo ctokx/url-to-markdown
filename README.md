@@ -1,116 +1,107 @@
-# HTML to Markdown Converter
+# URL to Markdown
 
-A browser-based tool for converting HTML to clean Markdown, designed for preparing text data for LLM consumption.
+Convert webpage HTML into Markdown that is easier to use in RAG/LLM pipelines.
 
-## Features
+This repo has two parts:
+- Web app (`index.html`) for manual conversion
+- CLI (`cli/`) for scripted and batch workflows
 
-- HTML to Markdown conversion using Turndown with GFM support
-- URL fetching via CORS proxies (allorigins, corsproxy.io, codetabs)
-- CSS selector picker with auto-extraction of IDs, classes, and semantic tags
-- Table alignment for consistent Markdown output
-- Metadata extraction (title, description, Open Graph, Twitter cards)
-- JSON export with conversion metadata
-- Noise removal (ads, navigation, scripts, hidden elements)
-- Media handling (strip or replace with alt text)
-- Link preservation toggle
+## What It Does
 
-## Usage
+- Converts HTML to Markdown (Turndown + GFM)
+- Supports CSS selector targeting (`--selector` / selector input)
+- Cleans common page noise (ads, nav, cookie banners, hidden elements)
+- Optional media stripping with context placeholders
+- Optional link stripping
+- Table normalization/alignment
+- Code fence language detection from HTML classes
+- Metadata extraction (title/meta tags/canonical/Open Graph/Twitter + JSON-LD)
+- Basic boilerplate dedupe in output
+- Smart content fallback when converting full `body`
 
-1. Enter a URL and click Fetch, or paste HTML directly
-2. Select a CSS selector from the picker or type one manually
-3. Configure options (table alignment, noise removal, etc.)
-4. Click Convert to Markdown
-5. Copy or download the output
+## Current Limits (Important)
 
-## File Structure
+- Web app fetching relies on public CORS proxies.
+- Web app cannot reliably handle many JS-rendered, anti-bot, or authenticated pages.
+- CLI `--render-js` needs Playwright installed and a browser binary available.
+- This project does not do chunking, embedding, retrieval, or vector indexing.
 
+## Quick Start
+
+### Web App
+
+Open `index.html` directly, or serve locally:
+
+```bash
+python -m http.server 8000
 ```
-├── index.html      # Main application
-├── css/
-│   └── main.css    # Styles
-└── js/
-    ├── config.js   # Tailwind configuration
-    └── app.js      # Application logic
+
+Then open `http://localhost:8000`.
+
+### CLI
+
+```bash
+cd cli
+npm install
+node bin/md4llm.js https://example.com
 ```
 
-## Dependencies
+Optional JS-render support:
 
-External libraries loaded via CDN:
+```bash
+npm install playwright
+npx playwright install chromium
+```
 
-- [Turndown](https://github.com/mixmark-io/turndown) - HTML to Markdown conversion
-- [Turndown Plugin GFM](https://github.com/mixmark-io/turndown-plugin-gfm) - GitHub Flavored Markdown support
-- [DOMPurify](https://github.com/cure53/DOMPurify) - HTML sanitization
-- [Marked](https://github.com/markedjs/marked) - Markdown preview rendering
-- [Tailwind CSS](https://tailwindcss.com/) - Styling
+## CLI Examples
 
-## CORS Proxies
+```bash
+# Basic conversion
+md4llm https://example.com
 
-URL fetching uses public CORS proxies with automatic fallback:
+# Extract only article content
+md4llm https://example.com -s "article" -o output.md
 
-1. api.allorigins.win
-2. corsproxy.io
-3. api.codetabs.com
+# JSON output with metadata
+md4llm https://example.com --meta --format json
 
-For production use, deploy your own proxy server or use a browser extension to bypass CORS restrictions.
+# Strip links and media for cleaner embeddings
+md4llm https://example.com --no-links --strip-media
 
-## Token Counting
+# Batch mode
+md4llm --batch urls.txt -o ./output/
 
-This tool does not include token counting. Use these resources:
+# Use browser rendering for JS-heavy pages
+md4llm https://example.com/docs --render-js-auto
+```
 
-- OpenAI: https://platform.openai.com/tokenizer
-- Google: https://ai.google.dev/gemini-api/docs/tokens
+## Web Options
 
-For pricing, check your LLM provider's documentation.
+- `Align Tables`
+- `Strip Media`
+- `Smart Clean`
+- `Extract Meta`
+- `Keep Links`
 
-## Keyboard Shortcuts
+## Keyboard Shortcuts (Web)
 
-| Shortcut | Action |
-|----------|--------|
-| Ctrl+Enter | Convert HTML |
-| Ctrl+Shift+C | Copy output |
-| Ctrl+Shift+F | Fetch URL |
-| Ctrl+Shift+X | Clear input |
-| ? | Show help |
-| Esc | Close modals |
+- `Ctrl+Enter`: Convert
+- `Ctrl+Shift+C`: Copy output
+- `Ctrl+Shift+F`: Fetch URL
+- `Ctrl+Shift+X`: Clear input
+- `?`: Show help
+- `Esc`: Close modal
 
-## Selector Picker
+## Output Shape (JSON)
 
-After fetching HTML or pasting content, the selector panel displays:
-
-- **IDs** (orange) - Element IDs found in the document
-- **Classes** (green) - CSS classes, filtered to exclude framework prefixes
-- **Tags** (purple) - Semantic HTML5 tags (article, main, section, etc.)
-
-Clicking a selector updates the input field and shows the corresponding HTML element.
-
-### Selector Drilling
-
-After clicking a selector, the panel automatically shows **children of that element**:
-
-- Numbers in parentheses (e.g., `.content (5)`) indicate how many children that element has
-- Click children to drill deeper
-- Click **"← Show all"** to go back to the full selector list
-
-This helps navigate deeply nested content without knowing exact CSS selectors.
-
-## Output Formats
-
-### Markdown
-Clean Markdown with aligned tables, proper heading hierarchy, and GFM syntax.
-
-### JSON
 ```json
 {
   "markdown": "...",
-  "metadata": {
-    "title": "...",
-    "description": "...",
-    "og_title": "..."
-  },
-  "sourceUrl": "...",
-  "selector": "...",
-  "timestamp": "...",
-  "options": {...},
+  "metadata": {},
+  "sourceUrl": "https://example.com/page",
+  "selector": "article",
+  "timestamp": "2026-03-08T12:00:00.000Z",
+  "options": {},
   "stats": {
     "characters": 0,
     "words": 0,
@@ -119,69 +110,32 @@ Clean Markdown with aligned tables, proper heading hierarchy, and GFM syntax.
 }
 ```
 
-## Options
+## RAG/LLM Use (Minimal Guidance)
 
-| Option | Description |
-|--------|-------------|
-| Align Tables | Format Markdown tables with consistent column widths |
-| Strip Media | Remove images/video or replace with alt text placeholders |
-| Smart Clean | Remove scripts, styles, ads, navigation, hidden elements |
-| Extract Meta | Parse metadata from HTML head |
-| Keep Links | Preserve or strip hyperlinks |
+Typical flow:
+1. Convert page(s) to Markdown with relevant selector/options.
+2. Normalize/chunk in your ingestion pipeline.
+3. Store chunks + metadata in your retrieval store.
 
-## CLI Tool
+## Next Steps
 
-A command-line version is available for developers building RAG pipelines.
+1. Add golden-fixture regression tests with real pages (docs/blogs/forums/tables-heavy pages).
+2. Add a `--chunk` mode in CLI (size/overlap/token-estimate) for direct ingestion prep.
+3. Add a first-party fetch service for the web app (replace public CORS proxies).
+4. Add quality scoring in JSON output (content ratio, link density, boilerplate ratio).
+5. Add deterministic normalization profiles (`strict`, `balanced`, `raw`) for different training/indexing use cases.
 
-### Quick Start
+## Project Layout
 
-```bash
-# Navigate to CLI directory
-cd cli
-
-# Install dependencies
-npm install
-
-# Run directly
-node bin/md4llm.js https://example.com
-
-# Or link for global usage
-npm link
-md4llm https://example.com
-```
-
-### Examples
-
-```bash
-# Convert webpage to markdown
-md4llm https://docs.python.org -s "#content" -o docs.md
-
-# Extract with metadata as JSON
-md4llm https://example.com --meta --format json
-
-# Batch process URLs
-md4llm --batch urls.txt -o ./output/
-
-# Pipe from stdin
-curl -s https://example.com | md4llm -
-
-# Interactive selector drilling
-md4llm https://docs.python.org --interactive
-```
-
-See [cli/README.md](cli/README.md) for full documentation.
-
-## Local Development
-
-Open `index.html` in a browser. No build step required.
-
-For local file access, serve via HTTP:
-
-```bash
-python -m http.server 8000
+```text
+index.html
+app.html
+css/main.css
+js/app.js
+js/config.js
+cli/
 ```
 
 ## License
 
 MIT
-

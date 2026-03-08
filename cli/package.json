@@ -22,12 +22,17 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@joplin/turndown-plugin-gfm": "^1.0.56",
     "axios": "^1.6.2",
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
+    "he": "^1.2.0",
     "jsdom": "^23.0.1",
     "turndown": "^7.1.2"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.53.2"
   },
   "engines": {
     "node": ">=16.0.0"
